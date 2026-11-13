@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
-  title: Obscura Cloud API
+  title: Browser Session Cloud API
   version: 0.1.0
-  summary: User-facing session control API for the Obscura Cloud + Mobile fork.
+  summary: User-facing session control API for this Obscura fork.
   description: |
     This is the proposed v1 contract, not a claim that these endpoints are
     implemented. Worker CDP endpoints and worker credentials are private
