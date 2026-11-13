@@ -1,0 +1,507 @@
+openapi: 3.1.0
+info:
+  title: Obscura Cloud API
+  version: 0.1.0
+  summary: User-facing session control API for the Obscura Cloud + Mobile fork.
+  description: |
+    This is the proposed v1 contract, not a claim that these endpoints are
+    implemented. Worker CDP endpoints and worker credentials are private
+    infrastructure and MUST NOT be exposed through this API.
+
+    The initial client is a responsive PWA. Native clients may use the same
+    HTTPS API later. The API deliberately has no arbitrary JavaScript
+    evaluation, raw CDP passthrough, cookie export, local-file access, proxy
+    configuration, or stealth controls.
+servers:
+  - url: https://{host}/api/v1
+    description: Production deployment (host supplied by the deployment).
+    variables:
+      host:
+        default: cloud.example.invalid
+security:
+  - bearerAuth: []
+tags:
+  - name: Health
+  - name: Sessions
+  - name: Navigation
+  - name: Preview
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      description: Does not expose worker, database, or account information.
+      security: []
+      responses:
+        '200':
+          description: API process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ok
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe
+      description: |
+        Returns ready only when the configured persistence and worker
+        orchestrator dependencies are reachable. It must not return secrets,
+        internal hostnames, container IDs, or worker endpoints.
+      security: []
+      responses:
+        '200':
+          description: API can accept work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          description: API is alive but cannot safely accept work.
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List the authenticated user's sessions
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Only sessions owned by the authenticated principal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+                  next_cursor:
+                    type: [string, 'null']
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      tags: [Sessions]
+      summary: Create a browser session
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Client-generated key to avoid duplicate session creation on retry.
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '202':
+          description: Session accepted; worker provisioning is asynchronous.
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URL of the created session resource.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: User or service has reached its active-session quota.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid session configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: No safe worker capacity is available.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /sessions/{session_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Sessions]
+      summary: Get a session owned by the authenticated user
+      responses:
+        '200':
+          description: Session status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Sessions]
+      summary: Stop and delete a session
+      description: |
+        Idempotently requests worker termination, revokes its internal
+        capability, and schedules ephemeral profile cleanup. The response
+        confirms the control-plane state transition; worker teardown is
+        reported through the session state/events.
+      responses:
+        '202':
+          description: Termination accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sessions/{session_id}/navigate:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [Navigation]
+      summary: Navigate the session to an HTTP(S) URL
+      description: |
+        Only http and https schemes are permitted. The worker-side network
+        policy MUST validate the resolved destination and every redirect at
+        connection time, not only validate the URL string at this API edge.
+        Loopback, private, link-local, multicast, metadata, and other
+        non-public destinations are denied by default. A navigation request
+        never grants access to arbitrary CDP methods.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  format: uri
+                  maxLength: 4096
+                  pattern: '^https?://'
+                wait_until:
+                  type: string
+                  enum: [commit, domcontentloaded, load]
+                  default: load
+      responses:
+        '202':
+          description: Navigation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NavigationAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          description: URL or destination violates navigation policy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502':
+          description: Worker failed to process navigation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /sessions/{session_id}/actions:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      tags: [Navigation]
+      summary: Run a bounded browser action
+      description: |
+        Only the enumerated actions are supported. There is intentionally no
+        arbitrary JavaScript evaluation, command execution, or CDP passthrough.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [back, forward, reload, stop]
+      responses:
+        '202':
+          description: Action accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActionAccepted'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /sessions/{session_id}/preview:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Preview]
+      summary: Retrieve the latest bounded preview image
+      description: |
+        Returns a session-owned screenshot. The service enforces maximum
+        dimensions, output bytes, capture frequency, and session ownership.
+        Worker-native screenshot/CDP access stays private.
+      parameters:
+        - name: max_width
+          in: query
+          schema:
+            type: integer
+            minimum: 160
+            maximum: 1920
+            default: 1280
+        - name: max_height
+          in: query
+          schema:
+            type: integer
+            minimum: 160
+            maximum: 1920
+            default: 1280
+      responses:
+        '200':
+          description: PNG preview image.
+          headers:
+            Cache-Control:
+              schema:
+                const: no-store
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Preview is not available yet.
+
+  /sessions/{session_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      tags: [Sessions]
+      summary: Subscribe to session lifecycle events
+      description: |
+        Server-Sent Events stream. Events contain bounded metadata only:
+        state changes, navigation lifecycle, and sanitized error codes.
+        They must not include cookies, authorization headers, page bodies,
+        internal worker addresses, or raw CDP payloads.
+      responses:
+        '200':
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Short-lived access token issued by the account authentication layer.
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+        maxLength: 512
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Missing or invalid access token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Session does not exist or is not owned by the caller.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Readiness:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+    CreateSessionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        viewport:
+          $ref: '#/components/schemas/Viewport'
+      required: [viewport]
+    Viewport:
+      type: object
+      additionalProperties: false
+      required: [width, height]
+      properties:
+        width:
+          type: integer
+          minimum: 320
+          maximum: 1920
+        height:
+          type: integer
+          minimum: 320
+          maximum: 1920
+        device_scale_factor:
+          type: number
+          minimum: 1
+          maximum: 2
+          default: 1
+    Session:
+      type: object
+      required: [id, state, viewport, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: [string, 'null']
+        state:
+          type: string
+          enum: [provisioning, starting, running, stopping, stopped, failed, expired]
+        viewport:
+          $ref: '#/components/schemas/Viewport'
+        current_url:
+          type: [string, 'null']
+          format: uri
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        last_activity_at:
+          type: [string, 'null']
+          format: date-time
+        error:
+          type: [object, 'null']
+          additionalProperties: false
+          properties:
+            code:
+              type: string
+              maxLength: 64
+            message:
+              type: string
+              maxLength: 256
+    NavigationAccepted:
+      type: object
+      required: [accepted, request_id]
+      properties:
+        accepted:
+          const: true
+        request_id:
+          type: string
+          format: uuid
+    ActionAccepted:
+      type: object
+      required: [accepted, action]
+      properties:
+        accepted:
+          const: true
+        action:
+          type: string
+          enum: [back, forward, reload, stop]
+    Error:
+      type: object
+      required: [error, message, request_id]
+      properties:
+        error:
+          type: string
+          maxLength: 64
+        message:
+          type: string
+          maxLength: 256
+        request_id:
+          type: string
+          format: uuid
