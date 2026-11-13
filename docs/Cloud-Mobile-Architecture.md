@@ -21,8 +21,10 @@ The existing workspace contains ten Rust crates: CLI, CDP, browser lifecycle, V8
 Current facts from this fork's `main`:
 
 - The release workflow builds Linux x86_64/ARM64, macOS, and Windows desktop binaries; it has no Android or iOS release target.
-- The CDP server already supports a bearer token through `OBSCURA_CDP_TOKEN`, origin checks, connection caps, and private-network blocking by default.
-- CDP is a browser-control protocol, not a user-facing multi-tenant cloud API.
+- The CDP server already supports a bearer token through `OBSCURA_CDP_TOKEN`, Origin/Host checks, connection caps, and private-network blocking by default.
+- `obscura-worker` is currently a newline-delimited JSON process using stdin/stdout. It is not a network service or a multi-tenant session manager.
+- `obscura serve` exposes the Chrome DevTools Protocol. CDP is a browser-control protocol, not a user-facing multi-tenant cloud API.
+- The existing Dockerfile runs as a non-root user, but a container image alone does not establish restricted outbound networking.
 - The engine executes untrusted page JavaScript in-process. The repository's security policy explicitly says in-process hardening is not a substitute for OS-level isolation.
 - The pinned dependency graph uses `deno_core 0.412.0` and `v8 150.4.0`. Cross-compilation support in a current V8 README is not proof that this exact workspace builds on mobile.
 
@@ -70,13 +72,19 @@ A native Android client can follow if PWA limitations materially affect the expe
 
 ### Cloud API
 
-A small Rust HTTP/WebSocket service is the control plane. Axum is a candidate because the repository already uses Tokio, but the dependency and version must be checked before adoption.
+The v1 interface is specified in [`docs/api/cloud-v1.openapi.yaml`](api/cloud-v1.openapi.yaml). It defines user-owned sessions, bounded navigation/actions, preview snapshots, and metadata-only Server-Sent Events. It intentionally omits arbitrary JavaScript evaluation, raw CDP passthrough, cookie export, local-file access, user-supplied proxies, and stealth controls.
 
-The API owns user identity, session ownership, authorization, quotas, lifecycle, and event logs. It issues short-lived, session-scoped capabilities and proxies permitted operations. It must not expose arbitrary CDP methods or a public worker address.
+**Axum 0.8.9 is the selected HTTP framework for the Rust control plane**, using the repository's existing Tokio runtime and Tower middleware ecosystem. Its dependency is not yet integrated into Cargo manifests or the lockfile. Before implementation, add it in one focused change and regenerate/commit `Cargo.lock` with Cargo; do not hand-edit the dependency graph. See the [Axum API docs](https://docs.rs/axum/latest/axum/) and [middleware docs](https://docs.rs/axum/latest/axum/middleware/).
+
+The API owns identity, session ownership, authorization, quotas, lifecycle, and metadata-only events. It issues short-lived, session-scoped internal capabilities and proxies only explicitly supported operations. A phone or browser client never receives a worker address or CDP token.
+
+Use SSE for initial lifecycle updates and bounded PNG snapshots for the first preview implementation. Add continuous screencast streaming only after the complete authorization, backpressure, cancellation, and reconnect behavior is tested.
 
 ### Worker isolation
 
-The first deployment target is Linux containers. Use one isolated worker container per active browser session for the MVP, then benchmark whether a safer and cheaper per-user worker model is viable.
+The first orchestration prototype is local-only and binds the Cloud API to loopback. It must not be advertised as a public hosted service.
+
+For the hosted design, Linux containers are the minimum worker boundary, with one worker container per active session initially. Public workloads require host-enforced egress restrictions and should be evaluated for VM/microVM isolation before launch. The current worker process protocol and CDP server are separate interfaces; the orchestrator adapter must be explicit about which one it uses and must not expose either directly to clients.
 
 Minimum container controls:
 
@@ -84,8 +92,9 @@ Minimum container controls:
 - No Docker socket, host filesystem mounts, or unnecessary Linux capabilities.
 - Read-only root filesystem where practical; bounded writable temp/profile storage.
 - CPU, memory, process-count, file-descriptor, and wall-clock limits.
-- Restricted egress with DNS/IP validation on every navigation, redirect, and subresource request.
-- Block loopback, private, link-local, and cloud metadata ranges by default.
+- Restricted egress enforced outside the browser process, with DNS/IP validation at connection time and on every redirect and subresource request.
+- Block loopback, private, link-local, multicast, IPv4-mapped IPv6, NAT64 metadata destinations, and cloud metadata ranges by default.
+- Do not rely on URL-string validation alone: prevent a second unchecked DNS resolution between validation and connection.
 - Separate worker credentials and storage per session; destroy temporary state on teardown.
 - Keep CDP on a private worker network. Require authentication even on that network.
 
@@ -150,9 +159,11 @@ The initial promise is **mobile browser access**, not “every phone can run the
 - Add contract tests before implementing the UI.
 
 ### M2 — Single-user local cloud prototype
-- Build the API and orchestrator for one local worker.
-- Keep worker CDP private and authenticated.
-- Verify create/navigate/preview/stop lifecycle and cleanup.
+- Implement the OpenAPI contract with Axum and in-memory session metadata only for local development.
+- Bind to loopback by default; require an explicit, documented opt-in for any non-loopback bind.
+- Connect one local worker through a private authenticated adapter.
+- Verify create/navigate/preview/stop lifecycle, cancellation, and cleanup.
+- Do not claim durable sessions or multi-user support in this milestone.
 
 ### M3 — Multi-user isolation
 - Add authentication, per-user authorization, per-session worker isolation, quotas, and audit events.
@@ -178,7 +189,14 @@ No milestone is complete based on a successful compile alone.
 - Mobile UI is tested on real Android and iOS browsers at supported viewport sizes.
 - No paid service is activated without explicit approval.
 
-## 9. Open decisions
+## 9. Verified implementation boundaries
+
+- The current upstream commit and the fork's `main` point to the same commit as of this audit; the working branch is based on that revision.
+- The existing `obscura-worker` protocol accepts `navigate`, `evaluate`, `title`, `dump_html`, `dump_text`, and `shutdown` commands over stdin/stdout. The proposed public API deliberately does not expose its `evaluate` command.
+- The CDP server already requires a minimum 32-byte `OBSCURA_CDP_TOKEN` when bound beyond loopback. This token is for private worker control only; it is not a replacement for account authentication.
+- The fork currently has no recorded GitHub Actions runs. The architecture/spec documentation has not yet been through a build or API-schema validation workflow.
+
+## 10. Open decisions
 
 These are intentionally unresolved until the service contract and prototype provide evidence:
 
@@ -188,3 +206,10 @@ These are intentionally unresolved until the service contract and prototype prov
 - Worker-per-session versus microVM isolation and its measured cost.
 - Minimum supported Android/iOS browser versions.
 - Whether a native app provides enough value beyond the PWA.
+
+## References
+
+- [Axum 0.8 documentation](https://docs.rs/axum/latest/axum/)
+- [Tokio graceful shutdown guidance](https://tokio.rs/tokio/topics/shutdown)
+- [OpenAPI 3.1.1 specification](https://spec.openapis.org/oas/v3.1.1.html)
+- [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
