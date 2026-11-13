@@ -78,6 +78,14 @@ The v1 interface is specified in [`docs/api/cloud-v1.openapi.yaml`](api/cloud-v1
 
 The API owns identity, session ownership, authorization, quotas, lifecycle, and metadata-only events. It issues short-lived, session-scoped internal capabilities and proxies only explicitly supported operations. A phone or browser client never receives a worker address or CDP token.
 
+### Worker adapter
+
+Use `obscura serve` as the private worker interface for the first browser-session prototype. The current `obscura-worker` stdin/stdout protocol has no screenshot command, so it cannot deliver the preview feature without expanding its protocol.
+
+The Cloud API connects to the worker's private CDP WebSocket and exposes only a narrow allowlist: target creation/attachment and the required `Page` methods for navigation, history, reload/stop, and screenshot capture. It must reject every unrecognized CDP method; in particular, it must never proxy `Runtime.evaluate`, `Browser.*`, file chooser operations, or raw protocol frames from clients. The protocol methods are documented in the [Chrome DevTools Protocol Page domain](https://chromedevtools.github.io/devtools-protocol/tot/Page/).
+
+Run one worker per session in the hosted design. In the local prototype, the worker listens on loopback with a unique internal `OBSCURA_CDP_TOKEN`; never return that token or the private WebSocket URL to the client. The current CDP bearer token protects the worker control channel, not the user's account.
+
 Use SSE for initial lifecycle updates and bounded PNG snapshots for the first preview implementation. Add continuous screencast streaming only after the complete authorization, backpressure, cancellation, and reconnect behavior is tested.
 
 ### Worker isolation
@@ -213,3 +221,4 @@ These are intentionally unresolved until the service contract and prototype prov
 - [Tokio graceful shutdown guidance](https://tokio.rs/tokio/topics/shutdown)
 - [OpenAPI 3.1.1 specification](https://spec.openapis.org/oas/v3.1.1.html)
 - [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)
+- [Chrome DevTools Protocol: Page domain](https://chromedevtools.github.io/devtools-protocol/tot/Page/)
